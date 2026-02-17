@@ -52,10 +52,12 @@ def poly_ring_product(a: Sequence[int], b: Sequence[int]) -> list[int]:
     return res
 
 
+# Currently replaces HWT and ZO from the original paper
 def sample_ternary(n: int) -> list[int]:
     return [random.choice([-1, 0, 1]) for _ in range(n)]
 
 
+# Sigma constant from Microsoft SEAL
 def sample_noise(n: int, sigma=3.2):
     return [int(round(random.gauss(0, sigma))) for _ in range(n)]
 
@@ -76,7 +78,7 @@ def random_msg(n: int) -> list[complex]:
     ]
 
 
-class Plaintext(SequenceClass):
+class PolyRingQ(SequenceClass):
     def __init__(self, coefs: list[int], modulus: int):
         self.coefs = list(coefs)
         self.N = len(self.coefs)
@@ -88,20 +90,20 @@ class Plaintext(SequenceClass):
 
     def __str__(self) -> str:
         return (
-            "Plaintext{"
+            "PolyRingQ{"
             + self.coefs.__str__()
             + ", log2(q): "
             + str(log2(self.modulus))
             + "}"
         )
 
-    def add(self, other: Plaintext) -> None:
+    def add(self, other: PolyRingQ) -> None:
         self.coefs[:] = [
             symmetric_mod(p[0] + p[1], self.modulus)
             for p in zip(self.coefs, other.coefs)
         ]
 
-    def mul(self, other: Plaintext) -> None:
+    def mul(self, other: PolyRingQ) -> None:
         self.coefs[:] = [
             symmetric_mod(x, self.modulus)
             for x in poly_ring_product(self.coefs, other.coefs)
@@ -116,29 +118,73 @@ class Plaintext(SequenceClass):
     def __len__(self) -> int:
         return self.N
 
-    def __add__(self, other: Plaintext) -> Plaintext:
-        assert type(other) is Plaintext
-        res = Plaintext(self.coefs, self.modulus)
+    def __add__(self, other: PolyRingQ) -> PolyRingQ:
+        assert type(other) is PolyRingQ
+        res = PolyRingQ(self.coefs, self.modulus)
         res.add(other)
         return res
 
-    def __sub__(self, other: Plaintext) -> Plaintext:
-        assert type(other) is Plaintext
-        res = Plaintext(other.coefs, self.modulus)
+    def __sub__(self, other: PolyRingQ) -> PolyRingQ:
+        assert type(other) is PolyRingQ
+        res = PolyRingQ(other.coefs, self.modulus)
         res.negate()
         res.add(self)
         return res
 
-    def __mul__(self, other: Plaintext) -> Plaintext:
-        assert type(other) is Plaintext
-        res = Plaintext(self.coefs, self.modulus)
+    def __mul__(self, other: PolyRingQ) -> PolyRingQ:
+        assert type(other) is PolyRingQ
+        res = PolyRingQ(self.coefs, self.modulus)
         res.mul(other)
         return res
 
 
+type Plaintext = PolyRingQ
+
+type PrivateKey = PolyRingQ
+type PublicKey = tuple[PolyRingQ, PolyRingQ]
+
+
+def keygen(modulus: int, N: int) -> tuple[PrivateKey, PublicKey]:
+    s = PolyRingQ(sample_ternary(N), modulus)
+    a = PolyRingQ(sample_uniform_mod(N, modulus), modulus)
+    e = PolyRingQ(sample_noise(N), modulus)
+
+    b = e - (a * s)
+
+    return (s, (b, a))
+
+
+def encrypt(p: Plaintext, pk: PublicKey) -> Ciphertext:
+    N = p.N
+    q = p.modulus
+    e0 = PolyRingQ(sample_noise(N), q)
+    e1 = PolyRingQ(sample_noise(N), q)
+    v = PolyRingQ(sample_ternary(N), q)
+    (b, a) = pk
+
+    c = ((v * b) + p + e0, (v * a) + e1)
+
+    return Ciphertext(c, 0)
+
+
 class Ciphertext:
-    def __init__(self):
-        return
+    def __init__(self, value: tuple[PolyRingQ, PolyRingQ], level: int):
+        self.value = value
+        self.modulus = value[0].modulus
+        self.level = level
+
+    def decrypt(self, s: PrivateKey) -> Plaintext:
+        return self.value[0] + (self.value[1] * s)
+
+    def __str__(self) -> str:
+        return self.value[0].__str__() + " | " + self.value[1].__str__()
+
+    def __add__(self, other: Ciphertext) -> Ciphertext:
+        assert type(other) is Ciphertext
+        res = Ciphertext(self.value, self.level)
+        res.value[0].add(other.value[0])
+        res.value[1].add(other.value[1])
+        return res
 
 
 class Ecnoder:
@@ -196,29 +242,16 @@ def main():
 
     q = 3656693795042607789140164492751593724976092146573208355242015434624228226595185798866687250879120069
 
-    p1 = Plaintext(enc.encode(m1), q)
-    p2 = Plaintext(enc.encode(m2), q)
+    p1 = PolyRingQ(enc.encode(m1), q)
+    p2 = PolyRingQ(enc.encode(m2), q)
 
-    s = Plaintext(sample_ternary(N), q)
-    a = Plaintext(sample_uniform_mod(N, q), q)
-    e = Plaintext(sample_noise(N), q)
+    (s, pk) = keygen(q, N)
 
-    b = e - (a * s)
+    c1 = encrypt(p1, pk)
+    c2 = encrypt(p2, pk)
+    c = c1 + c2
 
-    e10 = Plaintext(sample_noise(N), q)
-    e11 = Plaintext(sample_noise(N), q)
-    v1 = Plaintext(sample_ternary(N), q)
-
-    c1 = ((v1 * b) + p1 + e10, (v1 * a) + e11)
-
-    e20 = Plaintext(sample_noise(N), q)
-    e21 = Plaintext(sample_noise(N), q)
-    v2 = Plaintext(sample_ternary(N), q)
-
-    c2 = ((v2 * b) + p2 + e20, (v2 * a) + e21)
-
-    c = (c1[0] + c2[0], c1[1] + c2[1])
-    p = c[0] + (c[1] * s)
+    p = c.decrypt(s)
 
     m_dec = enc.decode(p)
     m_exp = list(map(lambda x: x[0] + x[1], zip(m1, m2)))
