@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 from __future__ import annotations
-import copy
-from dataclasses import dataclass
 
+import copy
 import random
 import secrets
 from collections.abc import Sequence as SequenceClass
-from math import cos, exp, pi, sin, sqrt, log2
+from dataclasses import dataclass
+from math import cos, exp, log2, pi, sin, sqrt
 from typing import Sequence
 
 type Numeric = complex | float | int
@@ -70,11 +70,8 @@ def sample_uniform_mod(n: int, modulus: int):
 def random_msg(n: int) -> list[complex]:
     assert n > 0
 
-    # minval = -1_000
-    # maxval = 1_000
-
-    minval = -10
-    maxval = 10
+    minval = -100
+    maxval = 100
 
     return [
         complex(random.uniform(minval, maxval), random.uniform(minval, maxval))
@@ -87,12 +84,12 @@ class PolyRingQ(SequenceClass):
         self.coefs = list(coefs)
         self.N = len(self.coefs)
         self.modulus = modulus
-        self._reduce_mod()
+        self.reduce_mod()
 
     def setcoefs(self, coefs: list[int]) -> None:
         self.coefs = list(coefs)
 
-    def _reduce_mod(self) -> None:
+    def reduce_mod(self) -> None:
         self.coefs[:] = [symmetric_mod(x, self.modulus) for x in self.coefs]
 
     def __str__(self) -> str:
@@ -161,22 +158,22 @@ class CKKSParams:
     N: int
     ql: list[int]
     n_of_levels: int
-    delta: int
+    scale: int
     P: int
 
 
 def paramsgen(n: int) -> CKKSParams:
-    delta = 2**60
-    q = 88570805546739013601
+    scale = 3926640043
+    q = 68098092032511344671558473187653224988251802726347
     n_of_levels = 5
 
     ql: list[int] = [q] * n_of_levels
     for i in range(1, n_of_levels):
-        ql[i] = ql[i - 1] * delta
+        ql[i] = ql[i - 1] * scale
 
-    P = 94322762397470840257
+    P = ql[-1] * 2
 
-    return CKKSParams(2**n, ql, n_of_levels, delta, P)
+    return CKKSParams(2**n, ql, n_of_levels, scale, P)
 
 
 type Plaintext = PolyRingQ
@@ -191,9 +188,6 @@ type PublicKey = tuple[PolyRingQ, PolyRingQ]
 type EvalKey = tuple[PolyRingQ, PolyRingQ]
 
 
-# a' <- R_q
-# e' <- DG(sigma^2)
-# b' := -a'*s + e' + P*(s^2)  (mod P*q)
 def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
     qL = params.ql[-1]
     N = params.N
@@ -235,11 +229,9 @@ class Ciphertext:
     ):
         self.value: tuple[PolyRingQ, PolyRingQ] = value
         self.level = level
-        self.modulus = params.ql[level]
         self.params = params
 
-        assert self.modulus == value[0].modulus
-        assert self.modulus == value[1].modulus
+        assert value[1].modulus == value[0].modulus
 
     def decrypt(self, s: PrivateKey) -> Plaintext:
         return self.value[0] + (self.value[1] * s)
@@ -248,10 +240,13 @@ class Ciphertext:
         assert self.level > 0
 
         self.level -= 1
-        self.modulus = self.params.ql[self.level]
+        modulus = self.params.ql[self.level]
 
-        self.value[0].scale_down_by(self.params.delta)
-        self.value[1].scale_down_by(self.params.delta)
+        self.value[0].scale_down_by(self.params.scale)
+        self.value[1].scale_down_by(self.params.scale)
+
+        self.value[0].modulus = modulus
+        self.value[1].modulus = modulus
 
     def __str__(self) -> str:
         return self.value[0].__str__() + " | " + self.value[1].__str__()
@@ -266,21 +261,15 @@ class Ciphertext:
 
         return res
 
-    # d0 := c1*c1'
-    # d1 := c1*c2' + c2*c1'
-    # d2 := c2*c2'
-
     def mul(self, other: Ciphertext, evk: EvalKey) -> Ciphertext:
         assert type(other) is Ciphertext
         assert other.level == self.level
 
         d0 = self.value[0] * other.value[0]
-        d1 = self.value[0] * other.value[1] + self.value[1] * other.value[0]
+        d1 = (self.value[0] * other.value[1]) + (self.value[1] * other.value[0])
         d2 = self.value[1] * other.value[1]
 
         (bp, ap) = evk
-
-        # c_mul := (d0, d1) + [Pinv * d2 * (b', a')]
 
         P = self.params.P
 
@@ -326,7 +315,7 @@ class Ciphertext:
 #
 # => c_mulconst = (c1*p, c2*p)
 #
-# Requires rescale (i guess?)
+# Requires rescale
 
 
 # CIPHERTEXT MUL
@@ -365,10 +354,6 @@ class Ciphertext:
 #          (since d2 can be).
 #          For that reason: log P ≈ log q
 #
-# Note: Multiplying by P is not ring multiplication,
-#       but scaling of coefficients by P. Multuplying by Pinv
-#       is just dividing coefficients by P and rounding
-#
 # evk := (b', a')  <->  "evaluation key"
 #                       precomputed and used for (every) relinearization
 #
@@ -376,9 +361,10 @@ class Ciphertext:
 
 
 class Ecnoder:
-    def __init__(self, n: int):
+    def __init__(self, n: int, delta: int):
         self.N = 2**n
         self.M = 2 * self.N
+        self.delta = delta
 
         zeta: complex = complex_exp(complex(0, -2 * pi / self.M))
         self.roots: list[complex] = list(map(lambda i: zeta**i, range(1, self.M, 2)))
@@ -395,16 +381,16 @@ class Ecnoder:
         assert len(a) == self.N
         return list(map(lambda r: poly_eval(a, r), self.roots))
 
-    def decode(self, a: Sequence[int], delta: int) -> list[complex]:
-        a = list(map(lambda x: x / delta, a))
+    def decode(self, a: Sequence[int]) -> list[complex]:
+        a = list(map(lambda x: x / self.delta, a))
         return self.sigma(a)[0 : self.N // 2]
 
     def conjugate_extend(self, m: Sequence[complex]) -> list[complex]:
         return list(m) + list(map(lambda x: x.conjugate(), m[::-1]))
 
-    def encode(self, m: Sequence[complex], delta: int) -> list[int]:
+    def encode(self, m: Sequence[complex]) -> list[int]:
         assert len(m) == self.N // 2
-        m = list(map(lambda x: x * delta, self.conjugate_extend(m)))
+        m = list(map(lambda x: x * self.delta, self.conjugate_extend(m)))
         return list(
             map(
                 lambda x: round(inner_product(m, x).real / inner_product(x, x).real),
@@ -413,18 +399,10 @@ class Ecnoder:
         )
 
 
-# ----- TODO -----
-# Bootstrapping
-# RNS
-# ----------------
-
-
 def main():
     n = 2
     params = paramsgen(n)
-    delta = params.delta
-    levels = params.n_of_levels
-    enc = Ecnoder(2)
+    enc = Ecnoder(n, params.scale)
 
     # N = 2^n
     N = params.N
@@ -440,8 +418,8 @@ def main():
     m1 = random_msg(N // 2)
     m2 = random_msg(N // 2)
 
-    p1 = PolyRingQ(enc.encode(m1, delta ** (levels)), qL)
-    p2 = PolyRingQ(enc.encode(m2, delta ** (levels)), qL)
+    p1 = PolyRingQ(enc.encode(m1), qL)
+    p2 = PolyRingQ(enc.encode(m2), qL)
 
     (s, pk, evk) = keygen(params)
 
@@ -454,8 +432,8 @@ def main():
     p_add = c_add.decrypt(s)
     p_mul = c_mul.decrypt(s)
 
-    m_add_dec = enc.decode(p_add, delta ** (c_add.level + 1))
-    m_mul_dec = enc.decode(p_mul, delta ** (c_mul.level + 1))
+    m_add_dec = enc.decode(p_add)
+    m_mul_dec = enc.decode(p_mul)
 
     m_add_exp = list(map(lambda x: x[0] + x[1], zip(m1, m2)))
     m_mul_exp = list(map(lambda x: x[0] * x[1], zip(m1, m2)))
