@@ -4,10 +4,10 @@ from __future__ import annotations
 import copy
 import random
 import secrets
-from collections.abc import Sequence as SequenceClass
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import cos, exp, log2, pi, sin, sqrt
-from typing import Sequence
+from typing import overload, override
 
 type Numeric = complex | float | int
 
@@ -17,11 +17,11 @@ def complex_exp(x: complex) -> complex:
 
 
 def poly_eval(coefs: Sequence[Numeric], p: Numeric) -> Numeric:
-    return sum(map(lambda x: x[1] * (p ** x[0]), enumerate(coefs)))
+    return sum(c * (p**i) for i, c in enumerate(coefs))
 
 
 def inner_product(a: Sequence[complex], b: Sequence[complex]) -> complex:
-    return sum(map(lambda x: x[0] * x[1].conjugate(), zip(a, b)))
+    return sum(x * y.conjugate() for x, y in zip(a, b))
 
 
 def norm(a: Sequence[complex]) -> float:
@@ -29,7 +29,7 @@ def norm(a: Sequence[complex]) -> float:
 
 
 def distance(a: Sequence[complex], b: Sequence[complex]) -> float:
-    return norm(list(map(lambda x: x[0] - x[1], zip(a, b))))
+    return norm([x - y for x, y in zip(a, b)])
 
 
 def symmetric_mod(val: int, modulus: int) -> int:
@@ -50,7 +50,7 @@ def poly_ring_product(a: Sequence[int], b: Sequence[int]) -> list[int]:
                 res[i + j] += a[i] * b[j]
             else:
                 k = i + j - n
-                res[k] += a[i] * b[j] * (-1)
+                res[k] -= a[i] * b[j]
     return res
 
 
@@ -59,11 +59,11 @@ def sample_ternary(n: int) -> list[int]:
     return [random.choice([-1, 0, 1]) for _ in range(n)]
 
 
-def sample_noise(n: int, sigma=3.2):
+def sample_noise(n: int, sigma: float = 3.2) -> list[int]:
     return [int(round(random.gauss(0, sigma))) for _ in range(n)]
 
 
-def sample_uniform_mod(n: int, modulus: int):
+def sample_uniform_mod(n: int, modulus: int) -> list[int]:
     return [secrets.randbelow(modulus) for _ in range(n)]
 
 
@@ -79,57 +79,59 @@ def random_msg(n: int) -> list[complex]:
     ]
 
 
-class PolyRingQ(SequenceClass):
+class PolyRingQ(Sequence[int]):
     def __init__(self, coefs: list[int], modulus: int):
-        self.coefs = list(coefs)
-        self.N = len(self.coefs)
-        self.modulus = modulus
+        self.coefs: list[int] = list(coefs)
+        self.N: int = len(self.coefs)
+        self.modulus: int = modulus
         self.reduce_mod()
-
-    def setcoefs(self, coefs: list[int]) -> None:
-        self.coefs = list(coefs)
 
     def reduce_mod(self) -> None:
         self.coefs[:] = [symmetric_mod(x, self.modulus) for x in self.coefs]
 
-    def __str__(self) -> str:
-        return (
-            "PolyRingQ{"
-            + self.coefs.__str__()
-            + ", log2(q): "
-            + str(log2(self.modulus))
-            + "}"
-        )
+    def change_mod(self, new_modulus: int) -> None:
+        self.modulus = new_modulus
+        self.reduce_mod()
 
-    def add(self, other: PolyRingQ) -> PolyRingQ:
+    @override
+    def __str__(self) -> str:
+        return f"PolyRingQ{{{self.coefs}, log2(q): {log2(self.modulus)}}}"
+
+    def add(self, other: PolyRingQ) -> None:
         self.coefs[:] = [
             symmetric_mod(p[0] + p[1], self.modulus)
             for p in zip(self.coefs, other.coefs)
         ]
-        return self
 
-    def mul(self, other: PolyRingQ) -> PolyRingQ:
+    def mul(self, other: PolyRingQ) -> None:
         self.coefs[:] = [
             symmetric_mod(x, self.modulus)
             for x in poly_ring_product(self.coefs, other.coefs)
         ]
-        return self
 
-    def scale_down_by(self, factor: int) -> PolyRingQ:
+    def scale_down_by(self, factor: int) -> None:
         self.coefs[:] = [x // factor for x in self.coefs]
-        return self
 
-    def scale_up_by(self, factor: int) -> PolyRingQ:
+    def scale_up_by(self, factor: int) -> None:
         self.coefs[:] = [x * factor for x in self.coefs]
-        return self
 
-    def negate(self) -> PolyRingQ:
+    def negate(self) -> None:
         self.coefs[:] = [symmetric_mod(-x, self.modulus) for x in self.coefs]
-        return self
 
-    def __getitem__(self, index):
+    def __neg__(self) -> PolyRingQ:
+        res = PolyRingQ(self.coefs, self.modulus)
+        res.negate()
+        return res
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[int]: ...
+    @override
+    def __getitem__(self, index: int | slice) -> int | Sequence[int]:
         return self.coefs[index]
 
+    @override
     def __len__(self) -> int:
         return self.N
 
@@ -153,7 +155,7 @@ class PolyRingQ(SequenceClass):
         return res
 
 
-@dataclass(repr=True, init=True)
+@dataclass
 class CKKSParams:
     N: int
     ql: list[int]
@@ -173,7 +175,7 @@ def paramsgen(n: int) -> CKKSParams:
 
     P = ql[-1] * 2
 
-    return CKKSParams(2**n, ql, n_of_levels, scale, P)
+    return CKKSParams(1 << n, ql, n_of_levels, scale, P)
 
 
 type Plaintext = PolyRingQ
@@ -202,7 +204,7 @@ def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
     ep = PolyRingQ(sample_noise(N), qL * P)
 
     Ps2 = s * s
-    Ps2.modulus = qL * P
+    Ps2.change_mod(qL * P)
     Ps2.scale_up_by(params.P)
 
     bp = ep + Ps2 - (ap * s)
@@ -228,8 +230,8 @@ class Ciphertext:
         self, value: tuple[PolyRingQ, PolyRingQ], level: int, params: CKKSParams
     ):
         self.value: tuple[PolyRingQ, PolyRingQ] = value
-        self.level = level
-        self.params = params
+        self.level: int = level
+        self.params: CKKSParams = params
 
         assert value[1].modulus == value[0].modulus
 
@@ -245,11 +247,12 @@ class Ciphertext:
         self.value[0].scale_down_by(self.params.scale)
         self.value[1].scale_down_by(self.params.scale)
 
-        self.value[0].modulus = modulus
-        self.value[1].modulus = modulus
+        self.value[0].change_mod(modulus)
+        self.value[1].change_mod(modulus)
 
+    @override
     def __str__(self) -> str:
-        return self.value[0].__str__() + " | " + self.value[1].__str__()
+        return f"{self.value[0]} | {self.value[1]}"
 
     def __add__(self, other: Ciphertext) -> Ciphertext:
         assert type(other) is Ciphertext
@@ -273,14 +276,19 @@ class Ciphertext:
 
         P = self.params.P
 
-        d2.modulus = bp.modulus
-        c0 = d0 + (d2 * bp).scale_down_by(P)
-        c1 = d1 + (d2 * ap).scale_down_by(P)
+        d2.change_mod(bp.modulus)
 
-        self.value = (c0, c1)
-        self.rescale()
+        c0 = d2 * bp
+        c0.scale_down_by(P)
+        c0 += d0
 
-        return self
+        c1 = d2 * ap
+        c1.scale_down_by(P)
+        c1 += d1
+
+        res = Ciphertext((c0, c1), self.level, self.params)
+        res.rescale()
+        return res
 
 
 # CIPHERTEXT ADD
@@ -360,14 +368,14 @@ class Ciphertext:
 # Requires rescale!
 
 
-class Ecnoder:
+class Encoder:
     def __init__(self, n: int, delta: int):
-        self.N = 2**n
-        self.M = 2 * self.N
-        self.delta = delta
+        self.N: int = 2**n
+        self.M: int = 2 * self.N
+        self.delta: int = delta
 
         zeta: complex = complex_exp(complex(0, -2 * pi / self.M))
-        self.roots: list[complex] = list(map(lambda i: zeta**i, range(1, self.M, 2)))
+        self.roots: list[complex] = [zeta**i for i in range(1, self.M, 2)]
 
         assert len(self.roots) == self.N
 
@@ -375,34 +383,33 @@ class Ecnoder:
             [1 if i == j else 0 for j in range(0, self.N)] for i in range(0, self.N)
         ]
 
-        self.lattice_basis: list[list[complex]] = list(map(self.sigma, self.poly_basis))
+        self.lattice_basis: list[list[complex]] = [
+            self.sigma(p) for p in self.poly_basis
+        ]
 
-    def sigma(self, a: Sequence[int]) -> list[complex]:
+    def sigma(self, a: Sequence[int | float]) -> list[complex]:
         assert len(a) == self.N
-        return list(map(lambda r: poly_eval(a, r), self.roots))
+        return [poly_eval(a, r) for r in self.roots]
 
     def decode(self, a: Sequence[int]) -> list[complex]:
-        a = list(map(lambda x: x / self.delta, a))
-        return self.sigma(a)[0 : self.N // 2]
+        return self.sigma([x / self.delta for x in a])[: self.N // 2]
 
     def conjugate_extend(self, m: Sequence[complex]) -> list[complex]:
-        return list(m) + list(map(lambda x: x.conjugate(), m[::-1]))
+        return list(m) + [x.conjugate() for x in reversed(m)]
 
     def encode(self, m: Sequence[complex]) -> list[int]:
         assert len(m) == self.N // 2
-        m = list(map(lambda x: x * self.delta, self.conjugate_extend(m)))
-        return list(
-            map(
-                lambda x: round(inner_product(m, x).real / inner_product(x, x).real),
-                self.lattice_basis,
-            )
-        )
+        m = [x * self.delta for x in self.conjugate_extend(m)]
+        return [
+            round(inner_product(m, x).real / inner_product(x, x).real)
+            for x in self.lattice_basis
+        ]
 
 
 def main():
     n = 2
     params = paramsgen(n)
-    enc = Ecnoder(n, params.scale)
+    enc = Encoder(n, params.scale)
 
     # N = 2^n
     N = params.N
@@ -435,8 +442,8 @@ def main():
     m_add_dec = enc.decode(p_add)
     m_mul_dec = enc.decode(p_mul)
 
-    m_add_exp = list(map(lambda x: x[0] + x[1], zip(m1, m2)))
-    m_mul_exp = list(map(lambda x: x[0] * x[1], zip(m1, m2)))
+    m_add_exp = [a + b for a, b in zip(m1, m2)]
+    m_mul_exp = [a * b for a, b in zip(m1, m2)]
 
     print("ADDITION")
     print(f"Got: {m_add_dec}")
