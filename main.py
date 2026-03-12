@@ -189,6 +189,9 @@ type PublicKey = tuple[PolyRingQ, PolyRingQ]
 # (b', a')
 type EvalKey = tuple[PolyRingQ, PolyRingQ]
 
+# (b', a')
+type SwitchingKey = tuple[PolyRingQ, PolyRingQ]
+
 
 def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
     qL = params.ql[-1]
@@ -210,6 +213,23 @@ def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
     bp = ep + Ps2 - (ap * s)
 
     return (s, (b, a), (bp, ap))
+
+
+def ksgen(params: CKKSParams, s: PrivateKey, s_new: PrivateKey) -> SwitchingKey:
+    qL = params.ql[-1]
+    N = params.N
+    P = params.P
+
+    e = PolyRingQ(sample_noise(N), qL * P)
+
+    Ps = copy.deepcopy(s)
+    Ps.change_mod(P * qL)
+    Ps.scale_up_by(P)
+
+    a = PolyRingQ(sample_uniform_mod(N, P * qL), P * qL)
+    b = e - (a * s_new) + Ps
+
+    return (b, a)
 
 
 def encrypt(p: Plaintext, pk: PublicKey, params: CKKSParams) -> Ciphertext:
@@ -289,6 +309,24 @@ class Ciphertext:
         res = Ciphertext((c0, c1), self.level, self.params)
         res.rescale()
         return res
+
+    def keyswitch(self, swk: SwitchingKey) -> None:
+        (b, a) = swk
+        P = self.params.P
+
+        # c0 += (P^-1)*c1*b
+        # c1 = (P^-1)*c1*a
+
+        c1 = self.value[1]
+
+        c0p = b * c1
+        c0p.scale_down_by(P)
+        self.value[0].add(c0p)
+
+        self.value[1].modulus = a.modulus
+        self.value[1].mul(a)
+        self.value[1].scale_down_by(P)
+        self.value[1].change_mod(self.params.ql[self.level])
 
 
 # CIPHERTEXT ADD
@@ -375,7 +413,9 @@ class Encoder:
         self.delta: int = delta
 
         zeta: complex = complex_exp(complex(0, -2 * pi / self.M))
-        self.roots: list[complex] = [zeta**i for i in range(1, self.M, 2)]
+        self.roots: list[complex] = self.conjugate_extend(
+            [zeta**i for i in range(1, self.M, 4)]
+        )
 
         assert len(self.roots) == self.N
 
@@ -395,7 +435,7 @@ class Encoder:
         return self.sigma([x / self.delta for x in a])[: self.N // 2]
 
     def conjugate_extend(self, m: Sequence[complex]) -> list[complex]:
-        return list(m) + [x.conjugate() for x in reversed(m)]
+        return list(m) + [x.conjugate() for x in m]
 
     def encode(self, m: Sequence[complex]) -> list[int]:
         assert len(m) == self.N // 2
@@ -424,20 +464,30 @@ def main():
 
     m1 = random_msg(N // 2)
     m2 = random_msg(N // 2)
+    m3 = random_msg(N // 2)
 
     p1 = PolyRingQ(enc.encode(m1), qL)
     p2 = PolyRingQ(enc.encode(m2), qL)
+    p3 = PolyRingQ(enc.encode(m3), qL)
 
     (s, pk, evk) = keygen(params)
 
+    s_new = PolyRingQ(sample_ternary(N), qL)
+    swk = ksgen(params, s, s_new)
+
     c1 = encrypt(p1, pk, params)
     c2 = encrypt(p2, pk, params)
+    c3 = encrypt(p3, pk, params)
 
     c_add = c1 + c2
     c_mul = c1.mul(c2, evk)
+    c3.keyswitch(swk)
 
     p_add = c_add.decrypt(s)
     p_mul = c_mul.decrypt(s)
+
+    p_switched = c3.decrypt(s_new)
+    m_switched = enc.decode(p_switched)
 
     m_add_dec = enc.decode(p_add)
     m_mul_dec = enc.decode(p_mul)
@@ -454,6 +504,11 @@ def main():
     print(f"Got: {m_mul_dec}")
     print(f"Expected: {m_mul_exp}")
     print(f"Err: {distance(m_mul_dec, m_mul_exp)}")
+
+    print("\n\nKEY SWTICH")
+    print(f"Got: {m_switched}")
+    print(f"Expected: {m3}")
+    print(f"Err: {distance(m_switched, m3)}")
 
 
 if __name__ == "__main__":
