@@ -158,7 +158,7 @@ class PolyRingQ(Sequence[int]):
 @dataclass
 class CKKSParams:
     N: int
-    ql: list[int]
+    qls: list[int]
     n_of_levels: int
     scale: int
     P: int
@@ -193,43 +193,33 @@ type EvalKey = tuple[PolyRingQ, PolyRingQ]
 type SwitchingKey = tuple[PolyRingQ, PolyRingQ]
 
 
-def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
-    qL = params.ql[-1]
+def ksgen(params: CKKSParams, s: PrivateKey, sp: PrivateKey) -> SwitchingKey:
+    qL = params.qls[-1]
     N = params.N
     P = params.P
+
+    e = PolyRingQ(sample_noise(N), qL * P)
+
+    Ps_new = copy.deepcopy(sp)
+    Ps_new.change_mod(qL * P)
+    Ps_new.scale_up_by(P)
+
+    a = PolyRingQ(sample_uniform_mod(N, qL * P), qL * P)
+    b = e + Ps_new - (a * s)
+
+    return (b, a)
+
+
+def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
+    qL = params.qls[-1]
+    N = params.N
 
     s = PolyRingQ(sample_ternary(N), qL)
     a = PolyRingQ(sample_uniform_mod(N, qL), qL)
     e = PolyRingQ(sample_noise(N), qL)
     b = e - (a * s)
 
-    ap = PolyRingQ(sample_uniform_mod(N, qL * P), qL * P)
-    ep = PolyRingQ(sample_noise(N), qL * P)
-
-    Ps2 = s * s
-    Ps2.change_mod(qL * P)
-    Ps2.scale_up_by(params.P)
-
-    bp = ep + Ps2 - (ap * s)
-
-    return (s, (b, a), (bp, ap))
-
-
-def ksgen(params: CKKSParams, s: PrivateKey, s_new: PrivateKey) -> SwitchingKey:
-    qL = params.ql[-1]
-    N = params.N
-    P = params.P
-
-    e = PolyRingQ(sample_noise(N), qL * P)
-
-    Ps = copy.deepcopy(s)
-    Ps.change_mod(P * qL)
-    Ps.scale_up_by(P)
-
-    a = PolyRingQ(sample_uniform_mod(N, P * qL), P * qL)
-    b = e - (a * s_new) + Ps
-
-    return (b, a)
+    return (s, (b, a), ksgen(params, s, s * s))
 
 
 def encrypt(p: Plaintext, pk: PublicKey, params: CKKSParams) -> Ciphertext:
@@ -262,7 +252,7 @@ class Ciphertext:
         assert self.level > 0
 
         self.level -= 1
-        modulus = self.params.ql[self.level]
+        modulus = self.params.qls[self.level]
 
         self.value[0].scale_down_by(self.params.scale)
         self.value[1].scale_down_by(self.params.scale)
@@ -313,6 +303,8 @@ class Ciphertext:
     def keyswitch(self, swk: SwitchingKey) -> None:
         (b, a) = swk
         P = self.params.P
+        ql = self.params.qls[self.level]
+        qL = self.params.qls[-1]
 
         # c0 += (P^-1)*c1*b
         # c1 = (P^-1)*c1*a
@@ -320,13 +312,13 @@ class Ciphertext:
         c1 = self.value[1]
 
         c0p = b * c1
-        c0p.scale_down_by(P)
+        c0p.scale_down_by(P * (qL // ql))
         self.value[0].add(c0p)
 
         self.value[1].modulus = a.modulus
         self.value[1].mul(a)
-        self.value[1].scale_down_by(P)
-        self.value[1].change_mod(self.params.ql[self.level])
+        self.value[1].scale_down_by(P * (qL // ql))
+        self.value[1].change_mod(self.params.qls[self.level])
 
 
 # CIPHERTEXT ADD
@@ -453,7 +445,7 @@ def main():
 
     # N = 2^n
     N = params.N
-    qL = params.ql[-1]
+    qL = params.qls[-1]
 
     # # Example from the paper
     # m = [3 + 4j, 2 - 1j]
@@ -473,7 +465,7 @@ def main():
     (s, pk, evk) = keygen(params)
 
     s_new = PolyRingQ(sample_ternary(N), qL)
-    swk = ksgen(params, s, s_new)
+    swk = ksgen(params, s_new, s)
 
     c1 = encrypt(p1, pk, params)
     c2 = encrypt(p2, pk, params)
