@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import copy
@@ -118,6 +118,17 @@ class PolyRingQ(Sequence[int]):
     def negate(self) -> None:
         self.coefs[:] = [symmetric_mod(-x, self.modulus) for x in self.coefs]
 
+    def gaolis_automorphism(self, k: int) -> None:
+        n = len(self.coefs)
+        result: list[int] = [0] * n
+        for i in range(n):
+            pos = (i * k) % (2 * n)  # mod 2n since X^(2n) = 1
+            if pos >= n:
+                result[pos - n] -= self.coefs[i]
+            else:
+                result[pos] += self.coefs[i]
+        self.coefs[:] = result
+
     def __neg__(self) -> PolyRingQ:
         res = PolyRingQ(self.coefs, self.modulus)
         res.negate()
@@ -192,6 +203,8 @@ type EvalKey = tuple[PolyRingQ, PolyRingQ]
 # (b', a')
 type SwitchingKey = tuple[PolyRingQ, PolyRingQ]
 
+type RotationTable = list[SwitchingKey]
+
 
 def ksgen(params: CKKSParams, s: PrivateKey, sp: PrivateKey) -> SwitchingKey:
     qL = params.qls[-1]
@@ -220,6 +233,18 @@ def keygen(params: CKKSParams) -> tuple[PrivateKey, PublicKey, EvalKey]:
     b = e - (a * s)
 
     return (s, (b, a), ksgen(params, s, s * s))
+
+
+def generate_rotation_table(params: CKKSParams, s: PrivateKey) -> RotationTable:
+    M = params.N * 2
+    table: RotationTable = []
+    print(M)
+    for r in range(0, M):
+        k = pow(5, r, M)
+        sp = copy.deepcopy(s)
+        sp.gaolis_automorphism(k)
+        table.append(ksgen(params, s, sp))
+    return table
 
 
 def encrypt(p: Plaintext, pk: PublicKey, params: CKKSParams) -> Ciphertext:
@@ -320,6 +345,13 @@ class Ciphertext:
         self.value[1].scale_down_by(P * (qL // ql))
         self.value[1].change_mod(self.params.qls[self.level])
 
+    def rotate(self, r: int, rotation_table: RotationTable) -> None:
+        k = pow(5, r, 2 * self.params.N)
+        self.value[0].gaolis_automorphism(k)
+        self.value[1].gaolis_automorphism(k)
+
+        self.keyswitch(rotation_table[r])
+
 
 # CIPHERTEXT ADD
 #
@@ -406,7 +438,7 @@ class Encoder:
 
         zeta: complex = complex_exp(complex(0, -2 * pi / self.M))
         self.roots: list[complex] = self.conjugate_extend(
-            [zeta**i for i in range(1, self.M, 4)]
+            [zeta ** pow(5, i, self.M) for i in range(self.N // 2)]
         )
 
         assert len(self.roots) == self.N
@@ -439,7 +471,7 @@ class Encoder:
 
 
 def main():
-    n = 2
+    n = 3
     params = paramsgen(n)
     enc = Encoder(n, params.scale)
 
@@ -457,35 +489,44 @@ def main():
     m1 = random_msg(N // 2)
     m2 = random_msg(N // 2)
     m3 = random_msg(N // 2)
+    m4 = random_msg(N // 2)
 
     p1 = PolyRingQ(enc.encode(m1), qL)
     p2 = PolyRingQ(enc.encode(m2), qL)
     p3 = PolyRingQ(enc.encode(m3), qL)
+    p4 = PolyRingQ(enc.encode(m4), qL)
 
     (s, pk, evk) = keygen(params)
 
     s_new = PolyRingQ(sample_ternary(N), qL)
     swk = ksgen(params, s_new, s)
 
+    rotation_table = generate_rotation_table(params, s)
+    rotation = 2
+
     c1 = encrypt(p1, pk, params)
     c2 = encrypt(p2, pk, params)
     c3 = encrypt(p3, pk, params)
+    c4 = encrypt(p4, pk, params)
 
     c_add = c1 + c2
     c_mul = c1.mul(c2, evk)
     c3.keyswitch(swk)
+    c4.rotate(rotation, rotation_table)
 
     p_add = c_add.decrypt(s)
     p_mul = c_mul.decrypt(s)
-
     p_switched = c3.decrypt(s_new)
-    m_switched = enc.decode(p_switched)
+    p_rotated = c4.decrypt(s)
 
     m_add_dec = enc.decode(p_add)
     m_mul_dec = enc.decode(p_mul)
+    m_switched = enc.decode(p_switched)
+    m_rotated = enc.decode(p_rotated)
 
     m_add_exp = [a + b for a, b in zip(m1, m2)]
     m_mul_exp = [a * b for a, b in zip(m1, m2)]
+    m_rot_exp = m4[rotation:] + m4[:rotation]
 
     print("ADDITION")
     print(f"Got: {m_add_dec}")
@@ -501,6 +542,12 @@ def main():
     print(f"Got: {m_switched}")
     print(f"Expected: {m3}")
     print(f"Err: {distance(m_switched, m3)}")
+
+    print("\n\nROTATION")
+    print(f"Original: {m4}")
+    print(f"Got: {m_rotated}")
+    print(f"Expected: {m_rot_exp}")
+    print(f"Err: {distance(m_rotated, m_rot_exp)}")
 
 
 if __name__ == "__main__":
