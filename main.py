@@ -118,7 +118,7 @@ class PolyRingQ(Sequence[int]):
     def negate(self) -> None:
         self.coefs[:] = [symmetric_mod(-x, self.modulus) for x in self.coefs]
 
-    def gaolis_automorphism(self, k: int) -> None:
+    def galois_automorphism(self, k: int) -> None:
         n = len(self.coefs)
         result: list[int] = [0] * n
         for i in range(n):
@@ -242,7 +242,7 @@ def generate_rotation_table(params: CKKSParams, s: PrivateKey) -> RotationTable:
     for r in range(0, M):
         k = pow(5, r, M)
         sp = copy.deepcopy(s)
-        sp.gaolis_automorphism(k)
+        sp.galois_automorphism(k)
         table.append(ksgen(params, s, sp))
     return table
 
@@ -347,8 +347,8 @@ class Ciphertext:
 
     def rotate(self, r: int, rotation_table: RotationTable) -> None:
         k = pow(5, r, 2 * self.params.N)
-        self.value[0].gaolis_automorphism(k)
-        self.value[1].gaolis_automorphism(k)
+        self.value[0].galois_automorphism(k)
+        self.value[1].galois_automorphism(k)
 
         self.keyswitch(rotation_table[r])
 
