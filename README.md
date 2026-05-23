@@ -11,7 +11,7 @@
 - [ ] From later papers
   - [ ] Residue Number System (RNS)
   - [ ] Bootstrapping
-- [ ] "Efficient" (re)implementation
+- [x] "Efficient" (re)implementation: [rsckks](https://github.com/Prki42/rsckks)
 
 ## Resources
 
